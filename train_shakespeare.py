@@ -20,6 +20,7 @@ from itertools import cycle
 from typing import Optional
 
 import torch
+import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from dist_utils import (
@@ -64,7 +65,7 @@ class SimpleConfig:
 
     # DP settings
     agg_mode: str = "uniform"  # "uniform" or "signal_weighted"
-    signal_type: str = "cosine_to_prev_global"  # Changed: gradient alignment works better than loss
+    signal_type: str = "cosine_to_mean"  # Compare local grad to current unweighted mean
     weight_temp: float = 1.0
     weight_ema_beta: float = 0.9
     signal_ema_beta: float = 0.99
@@ -201,7 +202,6 @@ def train(cfg: SimpleConfig):
     signal = create_signal(cfg.signal_type, beta=cfg.signal_ema_beta)
     weight_state = WeightState()
     weights = compute_uniform_weights(ws, dev)
-    prev_global_grad = None  # Track global gradient for cosine signal
 
     # Training loop
     print0(f"Training for {cfg.max_steps} steps...")
@@ -230,13 +230,24 @@ def train(cfg: SimpleConfig):
         else:
             loss.backward()
 
-        # Update signal AFTER backward (when gradients exist)
-        # For cosine signal: compare local grad to previous global grad
         raw_model = model.module if hasattr(model, "module") else model
+
+        # Compute unweighted mean gradient for cosine_to_mean signal
+        mean_grad = None
+        if cfg.signal_type == "cosine_to_mean" and is_distributed():
+            # Get local gradient vector
+            local_grad = get_global_grad_vector(raw_model)
+            if local_grad is not None:
+                # All-reduce to get sum, then divide by world_size for mean
+                mean_grad = local_grad.clone()
+                dist.all_reduce(mean_grad, op=dist.ReduceOp.SUM)
+                mean_grad = mean_grad / ws
+
+        # Update signal AFTER backward (when gradients exist)
         sig_val = signal.update(
             loss=local_loss,
             model=raw_model,
-            global_grad=prev_global_grad,
+            mean_grad=mean_grad,  # For cosine_to_mean signal
         )
         signals = all_gather_float(sig_val, dev)
 
@@ -258,10 +269,6 @@ def train(cfg: SimpleConfig):
             sync_grads_weighted(raw_model, weights[r].item())
         else:
             sync_grads_uniform(raw_model, ws)
-
-        # Capture global gradient for next step's cosine signal
-        if cfg.signal_type == "cosine_to_prev_global":
-            prev_global_grad = get_global_grad_vector(raw_model)
 
         # Clip gradients
         grad_norm = clip_grad_norm(raw_model, cfg.clip_grad_norm)
