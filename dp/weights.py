@@ -105,8 +105,12 @@ def normalize_signals(signals: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     Returns:
         Normalized signals
     """
+    # Handle single-element case (single worker)
+    if signals.numel() <= 1:
+        return torch.zeros_like(signals)
+
     mean = signals.mean()
-    std = signals.std()
+    std = signals.std(unbiased=False)  # Use biased std to avoid NaN with small N
 
     if std < eps:
         # All signals are the same - return zeros (will result in uniform weights)

@@ -299,6 +299,107 @@ class CosineToGlobalSignal(BaseSignal):
         self.prev_global_grad = None  # Will be recomputed
 
 
+class CosineToMeanSignal(BaseSignal):
+    """
+    Signal based on cosine similarity to the CURRENT unweighted mean gradient.
+
+    This is the correct approach for identifying divergent workers:
+    1. All-reduce to get unweighted sum of gradients
+    2. Compare each worker's local gradient to this mean
+    3. Workers with divergent gradients get lower cosine similarity
+
+    Unlike CosineToGlobalSignal, this compares to the current consensus,
+    not the previous step's weighted gradient.
+    """
+
+    def __init__(self, beta: float = 0.9, eps: float = 1e-8):
+        """
+        Args:
+            beta: EMA smoothing factor (lower = faster adaptation)
+            eps: Small constant for numerical stability
+        """
+        self.beta = beta
+        self.eps = eps
+        self.ema_cosine: Optional[float] = None
+        self.step_count = 0
+
+    def update(
+        self,
+        model: nn.Module = None,
+        mean_grad: torch.Tensor = None,
+        **kwargs,
+    ) -> float:
+        """
+        Update cosine similarity signal.
+
+        Args:
+            model: Model with current local gradients
+            mean_grad: Unweighted mean gradient (computed via all-reduce in training loop)
+
+        Returns:
+            Signal value (EMA of cosine similarity, higher is better)
+        """
+        self.step_count += 1
+
+        # Flatten local gradients
+        local_grad = self._flatten_grads(model)
+
+        # Compute cosine similarity to unweighted mean
+        if mean_grad is not None and local_grad is not None:
+            cosine = self._cosine_similarity(local_grad, mean_grad)
+        else:
+            cosine = 1.0  # Neutral if no mean available
+
+        # Update EMA (use lower beta for faster adaptation)
+        if self.ema_cosine is None:
+            self.ema_cosine = cosine
+        else:
+            self.ema_cosine = self.beta * self.ema_cosine + (1 - self.beta) * cosine
+
+        return self.ema_cosine
+
+    def _flatten_grads(self, model: nn.Module) -> Optional[torch.Tensor]:
+        """Flatten all gradients into a single vector."""
+        grads = []
+        for p in model.parameters():
+            if p.grad is not None:
+                grads.append(p.grad.data.view(-1))
+
+        if not grads:
+            return None
+
+        return torch.cat(grads)
+
+    def _cosine_similarity(self, a: torch.Tensor, b: torch.Tensor) -> float:
+        """Compute cosine similarity between two vectors."""
+        norm_a = a.norm()
+        norm_b = b.norm()
+
+        if norm_a < self.eps or norm_b < self.eps:
+            return 0.0
+
+        return (a @ b / (norm_a * norm_b)).item()
+
+    def reset(self):
+        """Reset signal state."""
+        self.ema_cosine = None
+        self.step_count = 0
+
+    def state_dict(self) -> dict:
+        """Return state for checkpointing."""
+        return {
+            "ema_cosine": self.ema_cosine,
+            "step_count": self.step_count,
+            "beta": self.beta,
+        }
+
+    def load_state_dict(self, state: dict):
+        """Load state from checkpoint."""
+        self.ema_cosine = state["ema_cosine"]
+        self.step_count = state["step_count"]
+        self.beta = state.get("beta", self.beta)
+
+
 def create_signal(signal_type: str, beta: float = 0.99) -> BaseSignal:
     """
     Factory function to create signal objects.
@@ -314,6 +415,7 @@ def create_signal(signal_type: str, beta: float = 0.99) -> BaseSignal:
         "loss_ema": LossEMASignal,
         "grad_norm_stability": GradNormStabilitySignal,
         "cosine_to_prev_global": CosineToGlobalSignal,
+        "cosine_to_mean": CosineToMeanSignal,
     }
 
     if signal_type not in signals:
