@@ -134,9 +134,8 @@ def run_experiment() -> dict:
     os.chdir("/app")
     results = {}
 
+    # Only run the two non-IID configurations (the key comparison)
     configs = [
-        {"name": "iid_uniform", "agg_mode": "uniform", "non_iid_mode": "iid"},
-        {"name": "iid_weighted", "agg_mode": "signal_weighted", "non_iid_mode": "iid"},
         {"name": "noniid_uniform", "agg_mode": "uniform", "non_iid_mode": "clean_vs_corrupt"},
         {"name": "noniid_weighted", "agg_mode": "signal_weighted", "non_iid_mode": "clean_vs_corrupt"},
     ]
@@ -153,6 +152,7 @@ def run_experiment() -> dict:
             "train_shakespeare.py",
             f"--agg-mode={cfg['agg_mode']}",
             f"--non-iid-mode={cfg['non_iid_mode']}",
+            "--corruption-prob=0.5",  # Higher corruption for stronger signal
             "--max-steps=2000",
             "--batch-size=32",
         ]

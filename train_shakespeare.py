@@ -65,7 +65,7 @@ class SimpleConfig:
 
     # DP settings
     agg_mode: str = "uniform"  # "uniform" or "signal_weighted"
-    signal_type: str = "cosine_to_mean"  # Compare local grad to current unweighted mean
+    signal_type: str = "direction_stability"  # Measure each worker's gradient consistency over time
     weight_temp: float = 1.0
     weight_ema_beta: float = 0.9
     signal_ema_beta: float = 0.99
@@ -287,9 +287,10 @@ def train(cfg: SimpleConfig):
 
             if r == 0:
                 w_str = " ".join(f"{w:.3f}" for w in weights.tolist()) if cfg.agg_mode == "signal_weighted" else ""
+                s_str = " ".join(f"{s:.4f}" for s in signals.tolist()) if cfg.agg_mode == "signal_weighted" else ""
                 msg = f"step {step:5d} | loss {global_loss:.4f} | lr {lr_val:.2e} | gnorm {grad_norm:.2f}"
                 if w_str:
-                    msg += f" | w [{w_str}]"
+                    msg += f" | w [{w_str}] s [{s_str}]"
                 if eval_loss is not None:
                     msg += f" | eval {eval_loss:.4f}"
                 print(msg)
