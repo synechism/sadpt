@@ -400,12 +400,138 @@ class CosineToMeanSignal(BaseSignal):
         self.beta = state.get("beta", self.beta)
 
 
+class GradientDirectionStabilitySignal(BaseSignal):
+    """
+    Signal based on gradient direction stability over time.
+
+    This measures how consistent each worker's own gradient direction is.
+    Works with any number of workers (including 2) because it doesn't
+    compare to consensus - it measures self-consistency.
+
+    Key insight: Corrupted data produces noisy gradients that fluctuate
+    in direction, while clean data produces consistent gradient directions.
+
+    Algorithm:
+    1. Keep EMA of normalized gradient direction
+    2. Each step, compute cosine similarity of current gradient to EMA direction
+    3. Higher cosine = more stable direction = higher signal
+    """
+
+    def __init__(self, beta: float = 0.9, eps: float = 1e-8):
+        """
+        Args:
+            beta: EMA smoothing factor for direction tracking (lower = faster adaptation)
+            eps: Small constant for numerical stability
+        """
+        self.beta = beta
+        self.eps = eps
+        self.ema_direction: Optional[torch.Tensor] = None
+        self.ema_stability: Optional[float] = None
+        self.step_count = 0
+
+    def update(
+        self,
+        model: nn.Module = None,
+        **kwargs,
+    ) -> float:
+        """
+        Update gradient direction stability signal.
+
+        Args:
+            model: Model with current local gradients
+
+        Returns:
+            Signal value (EMA of direction stability, higher is better)
+        """
+        self.step_count += 1
+
+        # Get current gradient
+        local_grad = self._flatten_grads(model)
+        if local_grad is None:
+            return self.ema_stability if self.ema_stability is not None else 1.0
+
+        # Normalize to unit vector (direction only)
+        grad_norm = local_grad.norm()
+        if grad_norm < self.eps:
+            return self.ema_stability if self.ema_stability is not None else 1.0
+        normalized_grad = local_grad / grad_norm
+
+        # First step: initialize EMA direction
+        if self.ema_direction is None:
+            self.ema_direction = normalized_grad.clone()
+            self.ema_stability = 1.0
+            return self.ema_stability
+
+        # Compute cosine similarity to EMA direction (stability measure)
+        stability = self._cosine_similarity(normalized_grad, self.ema_direction)
+
+        # Update EMA of stability score
+        if self.ema_stability is None:
+            self.ema_stability = stability
+        else:
+            self.ema_stability = self.beta * self.ema_stability + (1 - self.beta) * stability
+
+        # Update EMA direction (track the moving average direction)
+        self.ema_direction = self.beta * self.ema_direction + (1 - self.beta) * normalized_grad
+        # Re-normalize EMA direction to unit vector
+        ema_norm = self.ema_direction.norm()
+        if ema_norm > self.eps:
+            self.ema_direction = self.ema_direction / ema_norm
+
+        return self.ema_stability
+
+    def _flatten_grads(self, model: nn.Module) -> Optional[torch.Tensor]:
+        """Flatten all gradients into a single vector."""
+        grads = []
+        for p in model.parameters():
+            if p.grad is not None:
+                grads.append(p.grad.data.view(-1))
+
+        if not grads:
+            return None
+
+        return torch.cat(grads)
+
+    def _cosine_similarity(self, a: torch.Tensor, b: torch.Tensor) -> float:
+        """Compute cosine similarity between two vectors."""
+        norm_a = a.norm()
+        norm_b = b.norm()
+
+        if norm_a < self.eps or norm_b < self.eps:
+            return 0.0
+
+        return (a @ b / (norm_a * norm_b)).item()
+
+    def reset(self):
+        """Reset signal state."""
+        self.ema_direction = None
+        self.ema_stability = None
+        self.step_count = 0
+
+    def state_dict(self) -> dict:
+        """Return state for checkpointing."""
+        return {
+            "ema_stability": self.ema_stability,
+            "step_count": self.step_count,
+            "beta": self.beta,
+            # Note: ema_direction not saved (recomputed from training)
+        }
+
+    def load_state_dict(self, state: dict):
+        """Load state from checkpoint."""
+        self.ema_stability = state["ema_stability"]
+        self.step_count = state["step_count"]
+        self.beta = state.get("beta", self.beta)
+        self.ema_direction = None  # Will be recomputed
+
+
 def create_signal(signal_type: str, beta: float = 0.99) -> BaseSignal:
     """
     Factory function to create signal objects.
 
     Args:
-        signal_type: Type of signal ("loss_ema", "grad_norm_stability", "cosine_to_prev_global")
+        signal_type: Type of signal ("loss_ema", "grad_norm_stability", "cosine_to_prev_global",
+                     "cosine_to_mean", "direction_stability")
         beta: EMA smoothing factor
 
     Returns:
@@ -416,6 +542,7 @@ def create_signal(signal_type: str, beta: float = 0.99) -> BaseSignal:
         "grad_norm_stability": GradNormStabilitySignal,
         "cosine_to_prev_global": CosineToGlobalSignal,
         "cosine_to_mean": CosineToMeanSignal,
+        "direction_stability": GradientDirectionStabilitySignal,
     }
 
     if signal_type not in signals:
