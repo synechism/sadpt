@@ -65,7 +65,7 @@ class SimpleConfig:
 
     # DP settings
     agg_mode: str = "uniform"  # "uniform" or "signal_weighted"
-    signal_type: str = "direction_stability"  # Measure each worker's gradient consistency over time
+    signal_type: str = "loss_ema"  # Lower loss = more trustworthy gradients
     weight_temp: float = 1.0
     weight_ema_beta: float = 0.9
     signal_ema_beta: float = 0.99
@@ -279,6 +279,8 @@ def train(cfg: SimpleConfig):
         # Logging
         if step % cfg.log_every == 0:
             global_loss = reduce_mean_scalar(local_loss)
+            # Gather per-worker losses to verify they differ
+            local_losses = all_gather_float(local_loss, dev)
             eval_loss = None
             if step % cfg.eval_every == 0 and step > 0:
                 eval_loss = evaluate(model, val_loader, dev)
@@ -288,9 +290,12 @@ def train(cfg: SimpleConfig):
             if r == 0:
                 w_str = " ".join(f"{w:.3f}" for w in weights.tolist()) if cfg.agg_mode == "signal_weighted" else ""
                 s_str = " ".join(f"{s:.4f}" for s in signals.tolist()) if cfg.agg_mode == "signal_weighted" else ""
+                l_str = " ".join(f"{l:.2f}" for l in local_losses.tolist()) if is_distributed() else ""
                 msg = f"step {step:5d} | loss {global_loss:.4f} | lr {lr_val:.2e} | gnorm {grad_norm:.2f}"
                 if w_str:
                     msg += f" | w [{w_str}] s [{s_str}]"
+                if l_str:
+                    msg += f" | losses [{l_str}]"
                 if eval_loss is not None:
                     msg += f" | eval {eval_loss:.4f}"
                 print(msg)
