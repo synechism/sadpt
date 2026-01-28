@@ -64,6 +64,7 @@ class DPConfig:
     signal_ema_beta: float = 0.99  # EMA smoothing for signal computation
     w_min: float = 0.1  # Minimum weight per worker (avoid zeroing out)
     w_max: float = 0.9  # Maximum weight per worker (avoid collapse to single)
+    weight_freeze_step: int = 500  # Freeze weights after this step to prevent flip during overfitting
 
 
 @dataclass
@@ -138,6 +139,7 @@ def get_config_from_args() -> Config:
     parser.add_argument("--signal-ema-beta", type=float, default=0.99)
     parser.add_argument("--w-min", type=float, default=0.1)
     parser.add_argument("--w-max", type=float, default=0.9)
+    parser.add_argument("--weight-freeze-step", type=int, default=500)
 
     # Runtime args
     parser.add_argument("--seed", type=int, default=42)
@@ -188,6 +190,7 @@ def get_config_from_args() -> Config:
             signal_ema_beta=args.signal_ema_beta,
             w_min=args.w_min,
             w_max=args.w_max,
+            weight_freeze_step=args.weight_freeze_step,
         ),
         runtime=RuntimeConfig(
             seed=args.seed,

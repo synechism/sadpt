@@ -263,16 +263,20 @@ def train(cfg):
         # Gather signals from all ranks
         signals = all_gather_float(signal_value, dev)
 
-        # Compute weights from signals
+        # Compute weights from signals (freeze after warmup to prevent flip during overfitting)
         if cfg.dp.agg_mode == "signal_weighted":
-            weights, weight_state = compute_weights(
-                signals=signals,
-                temp=cfg.dp.weight_temp,
-                w_min=cfg.dp.w_min,
-                w_max=cfg.dp.w_max,
-                ema_beta=cfg.dp.weight_ema_beta,
-                state=weight_state,
-            )
+            if step < cfg.dp.weight_freeze_step:
+                weights, weight_state = compute_weights(
+                    signals=signals,
+                    temp=cfg.dp.weight_temp,
+                    w_min=cfg.dp.w_min,
+                    w_max=cfg.dp.w_max,
+                    ema_beta=cfg.dp.weight_ema_beta,
+                    state=weight_state,
+                )
+            elif step == cfg.dp.weight_freeze_step:
+                print0(f"Freezing weights at step {step}: {weights.tolist()}")
+            # else: keep using the frozen weights
         else:
             weights = compute_uniform_weights(ws, dev)
 
