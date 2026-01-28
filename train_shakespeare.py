@@ -71,6 +71,7 @@ class SimpleConfig:
     signal_ema_beta: float = 0.99
     w_min: float = 0.1
     w_max: float = 0.9
+    weight_freeze_step: int = 500  # Freeze weights after this step to prevent flip during overfitting
 
     # Corruption (for non-IID experiments)
     non_iid_mode: str = "iid"  # "iid" or "clean_vs_corrupt"
@@ -251,16 +252,20 @@ def train(cfg: SimpleConfig):
         )
         signals = all_gather_float(sig_val, dev)
 
-        # Compute weights
+        # Compute weights (freeze after warmup to prevent flip during overfitting)
         if cfg.agg_mode == "signal_weighted":
-            weights, weight_state = compute_weights(
-                signals=signals,
-                temp=cfg.weight_temp,
-                w_min=cfg.w_min,
-                w_max=cfg.w_max,
-                ema_beta=cfg.weight_ema_beta,
-                state=weight_state,
-            )
+            if step < cfg.weight_freeze_step:
+                weights, weight_state = compute_weights(
+                    signals=signals,
+                    temp=cfg.weight_temp,
+                    w_min=cfg.w_min,
+                    w_max=cfg.w_max,
+                    ema_beta=cfg.weight_ema_beta,
+                    state=weight_state,
+                )
+            elif step == cfg.weight_freeze_step:
+                print0(f"Freezing weights at step {step}: {weights.tolist()}")
+            # else: keep using the frozen weights from step weight_freeze_step
         else:
             weights = compute_uniform_weights(ws, dev)
 
@@ -326,6 +331,7 @@ def parse_args() -> SimpleConfig:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--weight-freeze-step", type=int, default=500)
     args = parser.parse_args()
 
     cfg = SimpleConfig()
@@ -337,6 +343,7 @@ def parse_args() -> SimpleConfig:
     cfg.batch_size = args.batch_size
     cfg.lr = args.lr
     cfg.seed = args.seed
+    cfg.weight_freeze_step = args.weight_freeze_step
     return cfg
 
 
