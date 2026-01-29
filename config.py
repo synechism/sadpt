@@ -11,7 +11,7 @@ import argparse
 @dataclass
 class DataConfig:
     """Dataset and tokenization configuration."""
-    dataset_name: str = "wikitext"
+    dataset_name: str = "Salesforce/wikitext"
     dataset_config: str = "wikitext-103-raw-v1"
     tokenizer_name: str = "gpt2"
     seq_len: int = 256

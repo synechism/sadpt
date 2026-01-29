@@ -31,7 +31,7 @@ import sys
 from itertools import cycle
 
 import torch
-from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
 
 # Local imports
 from config import get_config_from_args, get_default_config
@@ -183,20 +183,15 @@ def train(cfg):
         print0("Compiling model...")
         model = torch.compile(model)
 
-    # Wrap in DDP
+    # Broadcast parameters from rank 0 to ensure all ranks start identical
+    # (replaces DDP's constructor broadcast - we don't use DDP because its
+    # backward hooks interfere with our custom gradient aggregation)
     if is_distributed():
-        model = DDP(
-            model,
-            device_ids=[lr],
-            output_device=lr,
-            broadcast_buffers=False,
-            find_unused_parameters=False,
-        )
+        for p in model.parameters():
+            dist.broadcast(p.data, src=0)
 
     # ===== 6. Create optimizer =====
-    # Get the underlying model for optimizer
-    raw_model = model.module if hasattr(model, "module") else model
-    optimizer = raw_model.configure_optimizers(
+    optimizer = model.configure_optimizers(
         weight_decay=cfg.training.weight_decay,
         learning_rate=cfg.training.lr,
         betas=cfg.training.betas,
@@ -280,25 +275,20 @@ def train(cfg):
         else:
             weights = compute_uniform_weights(ws, dev)
 
-        # Backward pass (no DDP sync)
+        # Backward pass
         optimizer.zero_grad(set_to_none=True)
-        if is_distributed():
-            with model.no_sync():
-                loss.backward()
-        else:
-            loss.backward()
+        loss.backward()
 
-        # Custom gradient synchronization
-        raw_model = model.module if hasattr(model, "module") else model
+        # Custom gradient synchronization (replaces DDP's all-reduce)
         if cfg.dp.agg_mode == "signal_weighted":
-            sync_grads_weighted(raw_model, weights[r].item())
+            sync_grads_weighted(model, weights[r].item())
         else:
-            sync_grads_uniform(raw_model, ws)
+            sync_grads_uniform(model, ws)
 
         # Gradient clipping
         grad_norm = None
         if cfg.training.clip_grad_norm is not None:
-            grad_norm = clip_grad_norm(raw_model, cfg.training.clip_grad_norm)
+            grad_norm = clip_grad_norm(model, cfg.training.clip_grad_norm)
 
         # Optimizer step
         optimizer.step()

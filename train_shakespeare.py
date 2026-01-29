@@ -21,7 +21,6 @@ from typing import Optional
 
 import torch
 import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
 
 from dist_utils import (
     setup_distributed,
@@ -186,13 +185,14 @@ def train(cfg: SimpleConfig):
     n_params = model.get_num_params()
     print0(f"Parameters: {n_params:,} ({n_params/1e6:.2f}M)")
 
-    # DDP wrap
+    # Broadcast parameters from rank 0 (replaces DDP constructor broadcast)
+    # We don't use DDP because its backward hooks interfere with custom gradient sync
     if is_distributed():
-        model = DDP(model, device_ids=[lr], output_device=lr, broadcast_buffers=False)
+        for p in model.parameters():
+            dist.broadcast(p.data, src=0)
 
     # Optimizer
-    raw_model = model.module if hasattr(model, "module") else model
-    optimizer = raw_model.configure_optimizers(
+    optimizer = model.configure_optimizers(
         weight_decay=cfg.weight_decay,
         learning_rate=cfg.lr,
         betas=(0.9, 0.95),
@@ -225,19 +225,13 @@ def train(cfg: SimpleConfig):
 
         # Backward FIRST (so gradients exist for signal computation)
         optimizer.zero_grad(set_to_none=True)
-        if is_distributed():
-            with model.no_sync():
-                loss.backward()
-        else:
-            loss.backward()
-
-        raw_model = model.module if hasattr(model, "module") else model
+        loss.backward()
 
         # Compute unweighted mean gradient for cosine_to_mean signal
         mean_grad = None
         if cfg.signal_type == "cosine_to_mean" and is_distributed():
             # Get local gradient vector
-            local_grad = get_global_grad_vector(raw_model)
+            local_grad = get_global_grad_vector(model)
             if local_grad is not None:
                 # All-reduce to get sum, then divide by world_size for mean
                 mean_grad = local_grad.clone()
@@ -247,7 +241,7 @@ def train(cfg: SimpleConfig):
         # Update signal AFTER backward (when gradients exist)
         sig_val = signal.update(
             loss=local_loss,
-            model=raw_model,
+            model=model,
             mean_grad=mean_grad,  # For cosine_to_mean signal
         )
         signals = all_gather_float(sig_val, dev)
@@ -269,14 +263,14 @@ def train(cfg: SimpleConfig):
         else:
             weights = compute_uniform_weights(ws, dev)
 
-        # Custom gradient sync
+        # Custom gradient sync (replaces DDP's all-reduce)
         if cfg.agg_mode == "signal_weighted":
-            sync_grads_weighted(raw_model, weights[r].item())
+            sync_grads_weighted(model, weights[r].item())
         else:
-            sync_grads_uniform(raw_model, ws)
+            sync_grads_uniform(model, ws)
 
         # Clip gradients
-        grad_norm = clip_grad_norm(raw_model, cfg.clip_grad_norm)
+        grad_norm = clip_grad_norm(model, cfg.clip_grad_norm)
 
         # Step
         optimizer.step()

@@ -117,15 +117,7 @@ def train_distributed(
 def run_experiment() -> dict:
     """
     Run the full experiment: compare uniform vs signal-weighted DP
-    on clean vs corrupted data.
-
-    This runs 4 configurations:
-    1. IID data + uniform DP (baseline)
-    2. IID data + signal-weighted DP
-    3. Non-IID (clean vs corrupt) + uniform DP
-    4. Non-IID (clean vs corrupt) + signal-weighted DP
-
-    The key result: configuration 4 should outperform 3.
+    on clean vs corrupted data using TinyShakespeare.
     """
     import subprocess
     import os
@@ -206,6 +198,80 @@ def run_experiment() -> dict:
     return results
 
 
+@app.function(
+    image=image,
+    gpu="A10G:2",  # Use A10G for faster training on larger dataset
+    timeout=14400,  # 4 hours for WikiText experiment
+    volumes={"/data": volume},
+)
+def run_wikitext_experiment() -> dict:
+    """
+    Run experiment on WikiText-103 (100M+ tokens) - much larger than TinyShakespeare.
+    This should show clearer benefits of signal-aware weighting since overfitting is less dominant.
+    """
+    import subprocess
+    import os
+    import time
+
+    os.chdir("/app")
+    results = {}
+
+    configs = [
+        {"name": "noniid_uniform", "agg_mode": "uniform", "non_iid_mode": "clean_vs_corrupt"},
+        {"name": "noniid_weighted", "agg_mode": "signal_weighted", "non_iid_mode": "clean_vs_corrupt"},
+    ]
+
+    for cfg in configs:
+        print("\n" + "=" * 60)
+        print(f"Running WikiText-103: {cfg['name']}")
+        print("=" * 60)
+
+        # Use separate checkpoint directory per config to avoid resume issues
+        ckpt_dir = f"checkpoints_{cfg['name']}"
+
+        # Clean up any existing checkpoints
+        subprocess.run(["rm", "-rf", ckpt_dir], capture_output=True)
+
+        cmd = [
+            "torchrun",
+            "--nproc_per_node=2",
+            "--master_port=29500",
+            "train.py",
+            f"--agg-mode={cfg['agg_mode']}",
+            f"--non-iid-mode={cfg['non_iid_mode']}",
+            "--dataset-name=Salesforce/wikitext",
+            "--dataset-config=wikitext-103-raw-v1",
+            "--corruption-prob=0.3",
+            "--max-steps=5000",
+            "--batch-size=16",
+            "--eval-every=500",
+            "--log-every=100",
+            "--weight-freeze-step=1000",
+            f"--ckpt-dir={ckpt_dir}",
+        ]
+
+        start = time.time()
+        result = subprocess.run(cmd, capture_output=False, text=True)
+        elapsed = time.time() - start
+
+        results[cfg["name"]] = {
+            "elapsed_seconds": elapsed,
+            "success": result.returncode == 0,
+        }
+
+        print(f"Result: time={elapsed:.1f}s, returncode={result.returncode}")
+
+    # Print summary
+    print("\n" + "=" * 60)
+    print("WIKITEXT EXPERIMENT SUMMARY")
+    print("=" * 60)
+    for name, res in results.items():
+        status = "OK" if res["success"] else "FAIL"
+        print(f"{name:20s} | time: {res['elapsed_seconds']:.1f}s | {status}")
+
+    return results
+
+
 @app.local_entrypoint()
 def main(
     agg_mode: str = "uniform",
@@ -214,6 +280,7 @@ def main(
     corruption_prob: float = 0.3,
     max_steps: int = 2000,
     experiment: bool = False,
+    wikitext: bool = False,
 ):
     """
     Local entrypoint - run from command line.
@@ -225,11 +292,17 @@ def main(
         # Signal-weighted with corruption
         modal run modal_train.py --agg-mode signal_weighted --non-iid-mode clean_vs_corrupt
 
-        # Full experiment (compares all configurations)
+        # Full experiment on TinyShakespeare
         modal run modal_train.py --experiment
+
+        # Full experiment on WikiText-103 (larger dataset, less overfitting)
+        modal run modal_train.py --wikitext
     """
-    if experiment:
-        print("Running full experiment (4 configurations)...")
+    if wikitext:
+        print("Running WikiText-103 experiment (larger dataset)...")
+        result = run_wikitext_experiment.remote()
+    elif experiment:
+        print("Running full experiment (TinyShakespeare)...")
         result = run_experiment.remote()
     else:
         print(f"Running single training: agg_mode={agg_mode}, non_iid_mode={non_iid_mode}")
