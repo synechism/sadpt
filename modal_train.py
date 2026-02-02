@@ -272,6 +272,101 @@ def run_wikitext_experiment() -> dict:
     return results
 
 
+@app.function(
+    image=image,
+    gpu="H100:8",  # 8x H100 for large-scale training
+    timeout=43200,  # 12 hours
+    volumes={"/data": volume},
+)
+def run_large_scale_experiment() -> dict:
+    """
+    Large-scale experiment with 8 GPUs, bigger model, and larger dataset.
+
+    Setup:
+    - 8x H100 GPUs
+    - GPT-2 Medium scale model (~350M params): 24 layers, 16 heads, 1024 dim
+    - OpenWebText dataset (~8B tokens)
+    - 50K training steps
+    - Non-IID: ranks 0-3 clean, ranks 4-7 corrupted (50% token swap)
+
+    This should show clear signal-aware weighting benefits with
+    half the cluster having corrupted data.
+    """
+    import subprocess
+    import os
+    import time
+
+    os.chdir("/app")
+    results = {}
+
+    configs = [
+        {"name": "noniid_uniform", "agg_mode": "uniform", "non_iid_mode": "clean_vs_corrupt"},
+        {"name": "noniid_weighted", "agg_mode": "signal_weighted", "non_iid_mode": "clean_vs_corrupt"},
+    ]
+
+    for cfg in configs:
+        print("\n" + "=" * 60)
+        print(f"Running Large-Scale: {cfg['name']}")
+        print("=" * 60)
+
+        ckpt_dir = f"checkpoints_large_{cfg['name']}"
+        subprocess.run(["rm", "-rf", ckpt_dir], capture_output=True)
+
+        cmd = [
+            "torchrun",
+            "--nproc_per_node=8",
+            "--master_port=29500",
+            "train.py",
+            f"--agg-mode={cfg['agg_mode']}",
+            f"--non-iid-mode={cfg['non_iid_mode']}",
+            # Large dataset: OpenWebText (capped at 500M tokens for reasonable runtime)
+            "--dataset-name=Skylion007/openwebtext",
+            "--dataset-config=none",  # OpenWebText has no config
+            "--max-train-tokens=500000000",  # 500M tokens
+            # Bigger model: GPT-2 Medium scale (~350M params)
+            "--n-layer=24",
+            "--n-head=16",
+            "--n-embd=1024",
+            "--seq-len=512",
+            # Training params
+            "--batch-size=8",  # Per-GPU batch size (8 GPUs * 8 = 64 effective)
+            "--max-steps=50000",
+            "--lr=3e-4",
+            "--warmup-steps=2000",
+            "--eval-every=1000",
+            "--log-every=100",
+            "--ckpt-every=5000",
+            # Corruption: 50% of workers get corrupted data
+            "--corruption-prob=0.5",
+            "--weight-freeze-step=5000",
+            f"--ckpt-dir={ckpt_dir}",
+        ]
+
+        start = time.time()
+        result = subprocess.run(cmd, capture_output=False, text=True)
+        elapsed = time.time() - start
+
+        results[cfg["name"]] = {
+            "elapsed_seconds": elapsed,
+            "success": result.returncode == 0,
+        }
+
+        print(f"Result: time={elapsed:.1f}s ({elapsed/3600:.2f}h), returncode={result.returncode}")
+
+    # Print summary
+    print("\n" + "=" * 60)
+    print("LARGE-SCALE EXPERIMENT SUMMARY")
+    print("=" * 60)
+    print("Config: 8x H100, GPT-2 Medium (~350M), OpenWebText, 50K steps")
+    print("-" * 60)
+    for name, res in results.items():
+        status = "OK" if res["success"] else "FAIL"
+        hours = res["elapsed_seconds"] / 3600
+        print(f"{name:20s} | time: {hours:.2f}h | {status}")
+
+    return results
+
+
 @app.local_entrypoint()
 def main(
     agg_mode: str = "uniform",
@@ -281,6 +376,7 @@ def main(
     max_steps: int = 2000,
     experiment: bool = False,
     wikitext: bool = False,
+    large: bool = False,
 ):
     """
     Local entrypoint - run from command line.
@@ -297,8 +393,15 @@ def main(
 
         # Full experiment on WikiText-103 (larger dataset, less overfitting)
         modal run modal_train.py --wikitext
+
+        # Large-scale experiment (8x H100, 350M model, OpenWebText, 50K steps)
+        modal run modal_train.py --large
     """
-    if wikitext:
+    if large:
+        print("Running LARGE-SCALE experiment (8x H100, 350M params, OpenWebText)...")
+        print("This will take several hours and cost ~$50-100")
+        result = run_large_scale_experiment.remote()
+    elif wikitext:
         print("Running WikiText-103 experiment (larger dataset)...")
         result = run_wikitext_experiment.remote()
     elif experiment:

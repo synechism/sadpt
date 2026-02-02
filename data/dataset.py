@@ -10,19 +10,23 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 
 
-def load_raw_text(dataset_name: str, dataset_config: str, split: str = "train"):
+def load_raw_text(dataset_name: str, dataset_config: Optional[str], split: str = "train"):
     """
     Load raw text dataset from HuggingFace datasets.
 
     Args:
         dataset_name: Dataset name (e.g., "wikitext")
-        dataset_config: Dataset configuration (e.g., "wikitext-103-raw-v1")
+        dataset_config: Dataset configuration (e.g., "wikitext-103-raw-v1"), or None
         split: Dataset split ("train", "validation", "test")
 
     Returns:
         HuggingFace dataset object
     """
-    ds = load_dataset(dataset_name, dataset_config, split=split)
+    # Handle datasets without configs (e.g., OpenWebText)
+    if dataset_config and dataset_config.lower() not in ("none", ""):
+        ds = load_dataset(dataset_name, dataset_config, split=split)
+    else:
+        ds = load_dataset(dataset_name, split=split)
     return ds
 
 
@@ -187,12 +191,27 @@ def create_dataloaders(
     )
 
     # Load validation data (same across all ranks, no corruption)
-    val_ds = load_raw_text(
-        cfg.data.dataset_name,
-        cfg.data.dataset_config,
-        split="validation",
-    )
-    val_tokens = build_token_stream(val_ds, tokenizer)
+    # Some datasets (like OpenWebText) don't have a validation split,
+    # so we try to load it and fall back to using a portion of train
+    try:
+        val_ds = load_raw_text(
+            cfg.data.dataset_name,
+            cfg.data.dataset_config,
+            split="validation",
+        )
+        val_tokens = build_token_stream(val_ds, tokenizer)
+    except (ValueError, KeyError):
+        # No validation split - use last 1% of training tokens
+        # (before corruption was applied, so use original train_ds)
+        print(f"[Rank {rank}] No validation split found, using last 1% of train data")
+        full_train_tokens = build_token_stream(
+            train_ds,
+            tokenizer,
+            max_tokens=cfg.data.max_train_tokens,
+        )
+        val_size = max(len(full_train_tokens) // 100, cfg.data.seq_len * 100)
+        val_tokens = full_train_tokens[-val_size:]
+
     val_dataset = CausalLMDataset(val_tokens, cfg.data.seq_len)
 
     val_loader = torch.utils.data.DataLoader(

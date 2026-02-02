@@ -22,7 +22,8 @@ class DataConfig:
 class CorruptionConfig:
     """Non-IID / corruption configuration for data sharding."""
     non_iid_mode: Literal["iid", "clean_vs_corrupt", "dup_skew"] = "iid"
-    corrupt_rank: int = 1  # Which rank gets corrupted data
+    corrupt_rank: int = 1  # Which rank gets corrupted data (legacy, for 2-GPU setup)
+    corrupt_fraction: float = 0.5  # Fraction of ranks to corrupt (0.5 = half the cluster)
     corruption_type: Literal["token_swap", "span_drop", "random_insert", "duplicate"] = "token_swap"
     corruption_prob: float = 0.3  # Probability of corruption per token
     dup_factor: int = 5  # Duplication factor for dup_skew mode
@@ -105,11 +106,15 @@ def get_config_from_args() -> Config:
     parser.add_argument("--dataset-config", type=str, default="wikitext-103-raw-v1")
     parser.add_argument("--tokenizer-name", type=str, default="gpt2")
     parser.add_argument("--seq-len", type=int, default=256)
+    parser.add_argument("--max-train-tokens", type=int, default=None,
+                        help="Limit training tokens (None = full dataset)")
 
     # Corruption args
     parser.add_argument("--non-iid-mode", type=str, default="iid",
                         choices=["iid", "clean_vs_corrupt", "dup_skew"])
     parser.add_argument("--corrupt-rank", type=int, default=1)
+    parser.add_argument("--corrupt-fraction", type=float, default=0.5,
+                        help="Fraction of ranks to corrupt (0.5 = half the cluster)")
     parser.add_argument("--corruption-type", type=str, default="token_swap",
                         choices=["token_swap", "span_drop", "random_insert", "duplicate"])
     parser.add_argument("--corruption-prob", type=float, default=0.3)
@@ -160,10 +165,12 @@ def get_config_from_args() -> Config:
             dataset_config=args.dataset_config,
             tokenizer_name=args.tokenizer_name,
             seq_len=args.seq_len,
+            max_train_tokens=args.max_train_tokens,
         ),
         corruption=CorruptionConfig(
             non_iid_mode=args.non_iid_mode,
             corrupt_rank=args.corrupt_rank,
+            corrupt_fraction=args.corrupt_fraction,
             corruption_type=args.corruption_type,
             corruption_prob=args.corruption_prob,
         ),

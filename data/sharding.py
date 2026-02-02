@@ -36,8 +36,20 @@ def make_rank_dataset(
         return base_tokens.clone()
 
     elif cfg.non_iid_mode == "clean_vs_corrupt":
-        # Clean vs corrupt: one rank gets corrupted data
-        if rank == cfg.corrupt_rank:
+        # Clean vs corrupt: a fraction of ranks get corrupted data
+        # For world_size=2, use legacy corrupt_rank behavior
+        # For world_size>2, corrupt the top corrupt_fraction of ranks
+        if world_size == 2:
+            # Legacy behavior: only corrupt_rank gets corrupted
+            is_corrupted = (rank == cfg.corrupt_rank)
+        else:
+            # Multi-GPU: corrupt top fraction of ranks
+            # e.g., 8 GPUs with fraction=0.5 -> ranks 4,5,6,7 corrupted
+            n_corrupt = int(world_size * cfg.corrupt_fraction)
+            corrupt_start = world_size - n_corrupt
+            is_corrupted = (rank >= corrupt_start)
+
+        if is_corrupted:
             return apply_corruption(base_tokens, cfg)
         else:
             return base_tokens.clone()
@@ -266,13 +278,14 @@ def apply_duplication(
     return torch.tensor(result[: len(tokens)], dtype=tokens.dtype)
 
 
-def describe_corruption(cfg: CorruptionConfig, rank: int) -> str:
+def describe_corruption(cfg: CorruptionConfig, rank: int, world_size: int = 2) -> str:
     """
     Return a human-readable description of what corruption is applied to this rank.
 
     Args:
         cfg: Corruption configuration
         rank: Process rank
+        world_size: Total number of processes
 
     Returns:
         Description string
@@ -280,7 +293,15 @@ def describe_corruption(cfg: CorruptionConfig, rank: int) -> str:
     if cfg.non_iid_mode == "iid":
         return "IID (no corruption)"
     elif cfg.non_iid_mode == "clean_vs_corrupt":
-        if rank == cfg.corrupt_rank:
+        # Determine if this rank is corrupted
+        if world_size == 2:
+            is_corrupted = (rank == cfg.corrupt_rank)
+        else:
+            n_corrupt = int(world_size * cfg.corrupt_fraction)
+            corrupt_start = world_size - n_corrupt
+            is_corrupted = (rank >= corrupt_start)
+
+        if is_corrupted:
             return f"CORRUPTED ({cfg.corruption_type}, prob={cfg.corruption_prob})"
         else:
             return "CLEAN"

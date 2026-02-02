@@ -147,7 +147,7 @@ def train(cfg):
     seed_all(cfg.runtime.seed, rank=r)
 
     # Print per-rank data description
-    data_desc = describe_corruption(cfg.corruption, r)
+    data_desc = describe_corruption(cfg.corruption, r, ws)
     print(f"[Rank {r}] Data: {data_desc}")
 
     barrier()

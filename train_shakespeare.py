@@ -161,7 +161,7 @@ def train(cfg: SimpleConfig):
     seed_all(cfg.seed, rank=r)
 
     # Data description per rank
-    data_desc = describe_corruption(cfg.corruption, r)
+    data_desc = describe_corruption(cfg.corruption, r, ws)
     print(f"[Rank {r}] Data: {data_desc}")
     barrier()
 
